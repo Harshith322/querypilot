@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+psycopg[binary]
+sqlglot
+anthropic
+pandas
+matplotlib
+httpx
+pytest
+python-dotenv

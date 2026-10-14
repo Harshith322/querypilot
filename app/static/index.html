@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QueryPilot</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { margin-bottom: 0.25rem; }
+  .sub { color: #666; margin-top: 0; }
+  form { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
+  input { flex: 1; padding: 0.7rem; font-size: 1rem; border: 1px solid #bbb; border-radius: 6px; }
+  button { padding: 0.7rem 1.2rem; font-size: 1rem; border: 0; border-radius: 6px; background: #2b59c3; color: #fff; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  pre { background: #f4f4f6; padding: 0.8rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f4f4f6; }
+  .wrap { overflow-x: auto; }
+  .error { color: #b00020; }
+  img { max-width: 100%; border: 1px solid #ddd; border-radius: 6px; }
+  h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: -0.5rem 0 1rem; }
+  .chip { background: #eef1fb; color: #2b59c3; border: 1px solid #cdd6f3; padding: 0.35rem 0.7rem; font-size: 0.85rem; border-radius: 999px; }
+  .tables { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .tbtn { background: #fff; color: #1a1a1a; border: 1px solid #bbb; padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+  .tbtn.active { border-color: #2b59c3; background: #eef1fb; }
+  .meta { color: #666; font-size: 0.85rem; }
+  .tag { font-size: 0.7rem; background: #e6e6ea; border-radius: 4px; padding: 0 0.3rem; margin-left: 0.3rem; }
+</style>
+</head>
+<body>
+<h1>QueryPilot</h1>
+<p class="sub">Ask a question about the database in plain English.</p>
+<form id="f">
+  <input id="q" maxlength="500" placeholder="Which product category had the highest revenue last quarter?" required>
+  <button id="b" type="submit">Ask</button>
+</form>
+<div id="examples" class="chips"></div>
+<div id="out"></div>
+<h2>Database</h2>
+<p class="meta">The data the agent can query. Click a table to see its columns and sample rows.</p>
+<div id="db" class="tables"></div>
+<div id="preview"></div>
+<script>
+const out = document.getElementById("out");
+const btn = document.getElementById("b");
+
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+
+function render(d) {
+  out.replaceChildren();
+  if (!d.ok) {
+    out.append(el("p", d.error || "Request failed.", "error"));
+    if (d.sql) { out.append(el("h2", "Last SQL tried")); out.append(el("pre", d.sql)); }
+    return;
+  }
+  out.append(el("h2", "SQL"), el("pre", d.sql));
+  const a = d.analysis;
+  if (a && a.insights.length) {
+    out.append(el("h2", "Insights"));
+    const ul = el("ul");
+    a.insights.forEach(t => ul.append(el("li", t)));
+    out.append(ul);
+  }
+  if (a && a.chart_url) {
+    out.append(el("h2", "Chart"));
+    const img = el("img"); img.src = a.chart_url; img.alt = "Result chart";
+    out.append(img);
+  }
+  out.append(el("h2", `Result (${d.total_rows} rows, showing ${d.preview_rows.length})`));
+  const table = el("table"), head = el("tr");
+  d.columns.forEach(c => head.append(el("th", c)));
+  table.append(head);
+  d.preview_rows.forEach(r => {
+    const tr = el("tr");
+    r.forEach(v => tr.append(el("td", v === null ? "null" : String(v))));
+    table.append(tr);
+  });
+  const wrap = el("div", undefined, "wrap"); wrap.append(table);
+  out.append(wrap);
+  if (d.attempts.length > 1) {
+    out.append(el("h2", "Attempts"));
+    d.attempts.forEach((t, i) => out.append(el("pre", `#${i + 1} ${t.stage}${t.error ? ": " + t.error : ""}\n${t.sql}`)));
+  }
+}
+
+function ask(question) {
+  document.getElementById("q").value = question;
+  document.getElementById("f").requestSubmit();
+}
+
+async function loadExamples() {
+  try {
+    const list = await (await fetch("/examples")).json();
+    const box = document.getElementById("examples");
+    list.forEach(q => {
+      const b = el("button", q, "chip");
+      b.type = "button";
+      b.addEventListener("click", () => ask(q));
+      box.append(b);
+    });
+  } catch (e) { /* examples are optional */ }
+}
+
+async function showTable(name, btn) {
+  document.querySelectorAll(".tbtn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  const box = document.getElementById("preview");
+  box.replaceChildren(el("p", "Loading...", "meta"));
+  const r = await fetch("/tables/" + encodeURIComponent(name));
+  if (!r.ok) { box.replaceChildren(el("p", "Could not load table.", "error")); return; }
+  const d = await r.json();
+  box.replaceChildren(el("h2", name));
+  const sch = window.__schema.find(t => t.name === name);
+  const cols = el("p", "", "meta");
+  sch.columns.forEach((c, i) => {
+    const span = el("span", c.name + " " + c.type);
+    cols.append(span);
+    if (c.pk) cols.append(el("span", "PK", "tag"));
+    if (c.fk) cols.append(el("span", "FK " + c.fk, "tag"));
+    if (i < sch.columns.length - 1) cols.append(document.createTextNode("  |  "));
+  });
+  box.append(cols);
+  const table = el("table"), head = el("tr");
+  d.columns.forEach(c => head.append(el("th", c)));
+  table.append(head);
+  d.rows.forEach(row => {
+    const tr = el("tr");
+    row.forEach(v => tr.append(el("td", v === null ? "null" : String(v))));
+    table.append(tr);
+  });
+  const wrap = el("div", undefined, "wrap"); wrap.append(table);
+  box.append(wrap);
+}
+
+async function loadSchema() {
+  const box = document.getElementById("db");
+  try {
+    const r = await fetch("/schema");
+    if (!r.ok) { box.append(el("span", "Database not reachable.", "error")); return; }
+    const d = await r.json();
+    window.__schema = d.tables;
+    d.tables.forEach(t => {
+      const label = t.row_count === null ? t.name : `${t.name} (${t.row_count.toLocaleString()})`;
+      const b = el("button", label, "tbtn");
+      b.type = "button";
+      b.addEventListener("click", () => showTable(t.name, b));
+      box.append(b);
+    });
+  } catch (e) { box.append(el("span", "Could not load schema.", "error")); }
+}
+
+loadExamples();
+loadSchema();
+
+document.getElementById("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  btn.disabled = true; out.replaceChildren(el("p", "Working..."));
+  try {
+    const r = await fetch("/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: document.getElementById("q").value }),
+    });
+    const d = await r.json();
+    if (!r.ok) { out.replaceChildren(el("p", d.detail || "Request failed.", "error")); }
+    else { render(d); }
+  } catch (err) {
+    out.replaceChildren(el("p", "Network error.", "error"));
+  } finally { btn.disabled = false; }
+});
+</script>
+</body>
+</html>
